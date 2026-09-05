@@ -1,6 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+
+from pydantic import BaseModel
+
 
 class WordBase(BaseModel):
     english_word: str
@@ -14,13 +15,13 @@ class WordCreate(BaseModel):
     entry_type: str = "word"
 
 class WordUpdate(BaseModel):
-    english_word: Optional[str] = None
-    german_word: Optional[str] = None
+    english_word: str | None = None
+    german_word: str | None = None
 
 class WordResponse(WordBase):
     id: int
     created_at: datetime
-    audio_url: Optional[str] = None
+    audio_url: str | None = None
 
     class Config:
         from_attributes = True

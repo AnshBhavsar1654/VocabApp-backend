@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FAILED=0
+
+echo -e "${YELLOW}Running backend checks...${NC}"
+echo ""
+
+# 1. Python syntax check
+echo -e "${YELLOW}[1/2] Python syntax check...${NC}"
+if python -m py_compile "$ROOT/main.py" \
+   && python -m py_compile "$ROOT/database.py" \
+   && python -m py_compile "$ROOT/models.py" \
+   && python -m py_compile "$ROOT/services/tts.py" \
+   && python -m py_compile "$ROOT/services/translation.py"; then
+    echo -e "${GREEN}  ✓ Python syntax OK${NC}"
+else
+    echo -e "${RED}  ✗ Python syntax errors found${NC}"
+    FAILED=1
+fi
+
+# 2. Ruff lint
+echo ""
+echo -e "${YELLOW}[2/2] Ruff lint...${NC}"
+if command -v ruff &>/dev/null; then
+    if ruff check "$ROOT" --config "$ROOT/pyproject.toml"; then
+        echo -e "${GREEN}  ✓ Ruff lint OK${NC}"
+    else
+        echo -e "${RED}  ✗ Ruff lint failed${NC}"
+        FAILED=1
+    fi
+elif command -v python &>/dev/null; then
+    if python -m ruff check "$ROOT" --config "$ROOT/pyproject.toml"; then
+        echo -e "${GREEN}  ✓ Ruff lint OK${NC}"
+    else
+        echo -e "${RED}  ✗ Ruff lint failed${NC}"
+        FAILED=1
+    fi
+else
+    echo -e "${YELLOW}  ⚠ ruff not found, skipping${NC}"
+fi
+
+echo ""
+if [ "$FAILED" -eq 1 ]; then
+    echo -e "${RED}Backend checks FAILED.${NC}"
+    exit 1
+else
+    echo -e "${GREEN}All backend checks passed!${NC}"
+    exit 0
+fi
