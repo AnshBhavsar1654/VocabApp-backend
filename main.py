@@ -34,7 +34,7 @@ async def _keep_alive():
         await asyncio.sleep(600)
         try:
             async with httpx.AsyncClient() as client:
-                await client.get(f"{RENDER_EXTERNAL_URL}/api/health", timeout=10)
+                await client.get(f"{RENDER_EXTERNAL_URL}/health", timeout=10)
         except Exception:
             pass
 
@@ -50,12 +50,12 @@ app.add_middleware(
 )
 
 
-@app.get("/api/health")
+@app.get("/health")
 def health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/words", response_model=models.WordResponse)
+@app.post("/words", response_model=models.WordResponse)
 def add_word(word_in: models.WordCreate, db: Session = Depends(get_db)):
     if word_in.source_lang == "de":
         german_word = word_in.text
@@ -89,7 +89,7 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db)):
     return response
 
 
-@app.get("/api/words", response_model=list[models.WordResponse])
+@app.get("/words", response_model=list[models.WordResponse])
 def get_words(db: Session = Depends(get_db)):
     words = db.query(DBWord).order_by(DBWord.created_at.desc()).all()
     results = []
@@ -100,7 +100,7 @@ def get_words(db: Session = Depends(get_db)):
     return results
 
 
-@app.delete("/api/words/{word_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/words/{word_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_word(word_id: int, db: Session = Depends(get_db)):
     word = db.query(DBWord).filter(DBWord.id == word_id).first()
     if not word:
@@ -113,7 +113,7 @@ def delete_word(word_id: int, db: Session = Depends(get_db)):
     return None
 
 
-@app.patch("/api/words/{word_id}", response_model=models.WordResponse)
+@app.patch("/words/{word_id}", response_model=models.WordResponse)
 def update_word(word_id: int, word_in: models.WordUpdate, db: Session = Depends(get_db)):
     word = db.query(DBWord).filter(DBWord.id == word_id).first()
     if not word:
@@ -137,7 +137,7 @@ def update_word(word_id: int, word_in: models.WordUpdate, db: Session = Depends(
     return response
 
 
-@app.get("/api/quiz/next", response_model=models.QuizNextResponse)
+@app.get("/quiz/next", response_model=models.QuizNextResponse)
 def get_quiz_next(db: Session = Depends(get_db)):
     words = db.query(DBWord).all()
     if not words:
@@ -156,7 +156,7 @@ def get_quiz_next(db: Session = Depends(get_db)):
     )
 
 
-@app.post("/api/quiz/check", response_model=models.QuizCheckResponse)
+@app.post("/quiz/check", response_model=models.QuizCheckResponse)
 def check_quiz_answer(req: models.QuizCheckRequest, db: Session = Depends(get_db)):
     word = db.query(DBWord).filter(DBWord.id == req.id).first()
     if not word:
