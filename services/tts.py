@@ -61,4 +61,10 @@ def delete_audio(filename: str) -> None:
 
 def get_audio_url(filename: str) -> str:
     supabase = _get_supabase()
-    return supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
+    try:
+        result = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(filename, 60 * 60 * 24 * 365)
+        if isinstance(result, dict):
+            return result.get("signedUrl") or result.get("signedURL")
+        return result
+    except Exception:
+        return supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
