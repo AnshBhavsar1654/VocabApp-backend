@@ -21,10 +21,24 @@ class Word(Base):
     english_word = Column(String, index=True, nullable=False)
     german_word = Column(String, index=True, nullable=False)
     audio_filename = Column(String, nullable=False)
+    entry_type = Column(String, index=True, nullable=False, default="word")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+def migrate_add_entry_type():
+    """Add entry_type column if it doesn't exist (for existing databases)."""
+    import sqlite3
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.execute("PRAGMA table_info(words)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "entry_type" not in columns:
+        conn.execute("ALTER TABLE words ADD COLUMN entry_type VARCHAR NOT NULL DEFAULT 'word'")
+        conn.commit()
+    conn.close()
+
+migrate_add_entry_type()
 
 def get_db():
     db = SessionLocal()

@@ -55,7 +55,8 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db)):
     new_word = DBWord(
         english_word=english_word,
         german_word=german_word,
-        audio_filename=audio_filename
+        audio_filename=audio_filename,
+        entry_type=word_in.entry_type
     )
     db.add(new_word)
     db.commit()
@@ -88,6 +89,31 @@ def delete_word(word_id: int, db: Session = Depends(get_db)):
     db.delete(word)
     db.commit()
     return None
+
+@app.patch("/api/words/{word_id}", response_model=models.WordResponse)
+def update_word(word_id: int, word_in: models.WordUpdate, db: Session = Depends(get_db)):
+    word = db.query(DBWord).filter(DBWord.id == word_id).first()
+    if not word:
+        raise HTTPException(status_code=404, detail="Word not found")
+    
+    german_changed = word_in.german_word is not None and word_in.german_word != word.german_word
+    
+    if german_changed:
+        audio_path = os.path.join(AUDIO_DIR, word.audio_filename)
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        word.german_word = word_in.german_word
+        word.audio_filename = generate_audio(word_in.german_word)
+    
+    if word_in.english_word is not None:
+        word.english_word = word_in.english_word
+    
+    db.commit()
+    db.refresh(word)
+    
+    response = models.WordResponse.model_validate(word)
+    response.audio_url = f"/audio/{word.audio_filename}"
+    return response
 
 @app.get("/api/quiz/next", response_model=models.QuizNextResponse)
 def get_quiz_next(db: Session = Depends(get_db)):

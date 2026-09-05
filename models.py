@@ -6,10 +6,16 @@ class WordBase(BaseModel):
     english_word: str
     german_word: str
     audio_filename: str
+    entry_type: str = "word"
 
 class WordCreate(BaseModel):
     text: str
     source_lang: str
+    entry_type: str = "word"
+
+class WordUpdate(BaseModel):
+    english_word: Optional[str] = None
+    german_word: Optional[str] = None
 
 class WordResponse(WordBase):
     id: int
