@@ -38,7 +38,7 @@ def generate_audio(german_text: str) -> str:
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=filename,
             file=audio_bytes,
-            file_options={"content_type": "audio/mpeg", "upsert": True},
+            file_options={"content-type": "audio/mpeg", "upsert": "true"},
         )
 
         return filename
