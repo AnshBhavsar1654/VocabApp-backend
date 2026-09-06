@@ -124,7 +124,11 @@ def update_word(word_id: int, word_in: models.WordUpdate, db: Session = Depends(
     if german_changed:
         delete_audio(word.audio_filename)
         word.german_word = word_in.german_word
-        word.audio_filename = generate_audio(word_in.german_word)
+        try:
+            word.audio_filename = generate_audio(word_in.german_word)
+        except Exception as e:
+            word.audio_filename = None
+            print(f"Audio regeneration failed: {e}")
 
     if word_in.english_word is not None:
         word.english_word = word_in.english_word

@@ -38,7 +38,7 @@ def generate_audio(german_text: str) -> str:
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=filename,
             file=audio_bytes,
-            file_options={"content_type": "audio/mpeg"},
+            file_options={"content_type": "audio/mpeg", "upsert": True},
         )
 
         return filename
@@ -59,7 +59,9 @@ def delete_audio(filename: str) -> None:
     except Exception as e:
         print(f"Error deleting audio from storage: {e}")
 
-def get_audio_url(filename: str) -> str:
+def get_audio_url(filename: str) -> str | None:
+    if not filename:
+        return None
     supabase = _get_supabase()
     try:
         result = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(filename, 60 * 60 * 24 * 365)
@@ -67,4 +69,7 @@ def get_audio_url(filename: str) -> str:
             return result.get("signedUrl") or result.get("signedURL")
         return result
     except Exception:
-        return supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
+        try:
+            return supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
+        except Exception:
+            return None
