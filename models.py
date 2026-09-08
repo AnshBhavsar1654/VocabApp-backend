@@ -18,13 +18,49 @@ class WordUpdate(BaseModel):
     english_word: str | None = None
     german_word: str | None = None
 
+class GroupInfo(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
 class WordResponse(WordBase):
     id: int
     created_at: datetime
     audio_url: str | None = None
+    groups: list[GroupInfo] = []
 
     class Config:
         from_attributes = True
+
+class GroupCreate(BaseModel):
+    name: str
+
+class GroupRename(BaseModel):
+    name: str
+
+class GroupResponse(BaseModel):
+    id: int
+    name: str
+    is_default: bool
+    created_at: datetime
+    word_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+class GroupWordsResponse(BaseModel):
+    id: int
+    name: str
+    is_default: bool
+    words: list[WordResponse]
+
+    class Config:
+        from_attributes = True
+
+class WordGroupRequest(BaseModel):
+    word_ids: list[int]
 
 class QuizNextResponse(BaseModel):
     id: int

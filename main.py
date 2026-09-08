@@ -5,8 +5,9 @@ from contextlib import asynccontextmanager
 
 import httpx
 import models
+from database import Group as DBGroup
 from database import Word as DBWord
-from database import get_db
+from database import get_db, word_groups
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,7 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _ensure_default_group()
     task = asyncio.create_task(_keep_alive())
     yield
     task.cancel()
@@ -53,6 +55,178 @@ app.add_middleware(
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+def _ensure_default_group():
+    from database import SessionLocal
+    db = SessionLocal()
+    try:
+        existing = db.query(DBGroup).filter(DBGroup.is_default == True).first()
+        if not existing:
+            default_group = DBGroup(name="Ungrouped", is_default=True)
+            db.add(default_group)
+            db.commit()
+    finally:
+        db.close()
+
+
+@app.get("/groups", response_model=list[models.GroupResponse])
+def get_groups(db: Session = Depends(get_db)):
+    groups = db.query(DBGroup).order_by(DBGroup.is_default.desc(), DBGroup.created_at.asc()).all()
+    result = []
+    for g in groups:
+        if g.is_default:
+            word_count = db.query(DBWord).filter(
+                ~DBWord.id.in_(
+                    db.query(word_groups.c.word_id)
+                    .join(DBGroup, DBGroup.id == word_groups.c.group_id)
+                    .filter(DBGroup.is_default == False)
+                )
+            ).count()
+        else:
+            word_count = len(g.words)
+        result.append(models.GroupResponse(
+            id=g.id,
+            name=g.name,
+            is_default=g.is_default,
+            created_at=g.created_at,
+            word_count=word_count,
+        ))
+    return result
+
+
+@app.post("/groups", response_model=models.GroupResponse)
+def create_group(group_in: models.GroupCreate, db: Session = Depends(get_db)):
+    name = group_in.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Group name cannot be empty")
+
+    existing = db.query(DBGroup).filter(func.lower(DBGroup.name) == name.lower()).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Group with this name already exists")
+
+    group = DBGroup(name=name)
+    db.add(group)
+    db.commit()
+    db.refresh(group)
+    return models.GroupResponse(
+        id=group.id,
+        name=group.name,
+        is_default=group.is_default,
+        created_at=group.created_at,
+        word_count=0,
+    )
+
+
+@app.patch("/groups/{group_id}", response_model=models.GroupResponse)
+def rename_group(group_id: int, group_in: models.GroupRename, db: Session = Depends(get_db)):
+    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group.is_default:
+        raise HTTPException(status_code=400, detail="Cannot rename the default group")
+
+    name = group_in.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Group name cannot be empty")
+
+    existing = db.query(DBGroup).filter(
+        func.lower(DBGroup.name) == name.lower(),
+        DBGroup.id != group_id,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Group with this name already exists")
+
+    group.name = name
+    db.commit()
+    db.refresh(group)
+    return models.GroupResponse(
+        id=group.id,
+        name=group.name,
+        is_default=group.is_default,
+        created_at=group.created_at,
+        word_count=len(group.words),
+    )
+
+
+@app.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group.is_default:
+        raise HTTPException(status_code=400, detail="Cannot delete the default group")
+
+    db.delete(group)
+    db.commit()
+    return None
+
+
+@app.get("/groups/{group_id}/words", response_model=models.GroupWordsResponse)
+def get_group_words(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    if group.is_default:
+        words = db.query(DBWord).filter(
+            ~DBWord.id.in_(
+                db.query(word_groups.c.word_id)
+                .join(DBGroup, DBGroup.id == word_groups.c.group_id)
+                .filter(DBGroup.is_default == False)
+            )
+        ).order_by(DBWord.created_at.desc()).all()
+    else:
+        words = group.words
+
+    word_responses = []
+    for w in words:
+        r = models.WordResponse.model_validate(w)
+        r.audio_url = get_audio_url(w.audio_filename)
+        r.groups = [models.GroupInfo(id=g.id, name=g.name) for g in w.groups]
+        word_responses.append(r)
+
+    return models.GroupWordsResponse(
+        id=group.id,
+        name=group.name,
+        is_default=group.is_default,
+        words=word_responses,
+    )
+
+
+@app.post("/groups/{group_id}/words", status_code=status.HTTP_200_OK)
+def add_words_to_group(group_id: int, req: models.WordGroupRequest, db: Session = Depends(get_db)):
+    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    words = db.query(DBWord).filter(DBWord.id.in_(req.word_ids)).all()
+    if len(words) != len(req.word_ids):
+        raise HTTPException(status_code=404, detail="One or more words not found")
+
+    for word in words:
+        if word not in group.words:
+            group.words.append(word)
+
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.delete("/groups/{group_id}/words/{word_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_word_from_group(group_id: int, word_id: int, db: Session = Depends(get_db)):
+    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    word = db.query(DBWord).filter(DBWord.id == word_id).first()
+    if not word:
+        raise HTTPException(status_code=404, detail="Word not found")
+
+    if word in group.words:
+        group.words.remove(word)
+        db.commit()
+
+    return None
 
 
 @app.post("/words", response_model=models.WordResponse)
@@ -96,6 +270,7 @@ def get_words(db: Session = Depends(get_db)):
     for w in words:
         r = models.WordResponse.model_validate(w)
         r.audio_url = get_audio_url(w.audio_filename)
+        r.groups = [models.GroupInfo(id=g.id, name=g.name) for g in w.groups]
         results.append(r)
     return results
 
