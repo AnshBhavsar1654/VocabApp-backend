@@ -2,8 +2,11 @@ import os
 import tempfile
 import uuid
 
+from dotenv import load_dotenv
 from gtts import gTTS
 from supabase import Client, create_client
+
+load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -14,8 +17,18 @@ _supabase: Client = None
 def _get_supabase() -> Client:
     global _supabase
     if _supabase is None:
-        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Re-read env at call time so import order vs load_dotenv() doesn't matter
+        url = os.getenv("SUPABASE_URL") or SUPABASE_URL
+        key = os.getenv("SUPABASE_KEY") or SUPABASE_KEY
+        _supabase = create_client(url, key)
     return _supabase
+
+
+def _resolve_bucket_and_url() -> tuple[str, str | None]:
+    """Return (bucket, base_url) reading env lazily."""
+    bucket = os.getenv("SUPABASE_STORAGE_BUCKET") or STORAGE_BUCKET or "audio"
+    base_url = os.getenv("SUPABASE_URL") or SUPABASE_URL
+    return bucket, base_url
 
 def generate_audio(german_text: str) -> str:
     safe_text = german_text.encode("ascii", "ignore").decode("ascii").strip()
@@ -62,14 +75,13 @@ def delete_audio(filename: str) -> None:
 def get_audio_url(filename: str) -> str | None:
     if not filename:
         return None
-    supabase = _get_supabase()
+    bucket, base_url = _resolve_bucket_and_url()
+    if base_url:
+        # Primary path — no SDK, no HTTP, just string interpolation
+        return f"{base_url.rstrip('/')}/storage/v1/object/public/{bucket}/{filename}"
+    # Fallback: try SDK's get_public_url (also zero network, pure formatting)
     try:
-        result = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(filename, 60 * 60 * 24 * 365)
-        if isinstance(result, dict):
-            return result.get("signedUrl") or result.get("signedURL")
-        return result
+        supabase = _get_supabase()
+        return supabase.storage.from_(bucket).get_public_url(filename)
     except Exception:
-        try:
-            return supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
-        except Exception:
-            return None
+        return None
