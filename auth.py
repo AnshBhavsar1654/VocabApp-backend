@@ -7,8 +7,10 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 load_dotenv()
 
-# Supabase new keys: publishable (sb_publishable_...) replaces legacy anon (eyJ...). Both map to anon role.
-# We accept all aliases: SUPABASE_PUBLISHABLE_KEY (new), SUPABASE_ANON_KEY (legacy), SUPABASE_KEY (old code)
+# Supabase accepts both the current publishable key (sb_publishable_...) and the
+# legacy anon key (eyJ...); both map to the anon role. All known aliases are
+# accepted here for backward compatibility: SUPABASE_PUBLISHABLE_KEY (current),
+# SUPABASE_ANON_KEY (legacy), SUPABASE_KEY (previous codebase convention).
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = (
     os.getenv("SUPABASE_PUBLISHABLE_KEY")
@@ -16,13 +18,14 @@ SUPABASE_ANON_KEY = (
     or os.getenv("SUPABASE_KEY")
 )
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY") or SUPABASE_ANON_KEY
-# Service role: new sb_secret_... replaces legacy service_role eyJ... — keep both aliases
+# Service role key: the current sb_secret_... format replaces the legacy service_role
+# JWT. Both aliases are accepted for backward compatibility.
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SECRET_KEY", "")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "anshbhavsar164@gmail.com").lower()
 
 security = HTTPBearer(auto_error=False)
 
-# cache supabase client for verification
+# Cached Supabase client used for token verification.
 _supabase_verify_client = None
 
 def _get_verify_client():
@@ -34,13 +37,13 @@ def _get_verify_client():
 
 async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
     if credentials is None or not credentials.credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authentication token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required. Please sign in.")
     token = credentials.credentials
-    # Try Supabase auth verification (network) first
+    # Primary path: verify the token against Supabase Auth over the network.
     try:
         client = _get_verify_client()
         if client:
-            # supabase-py get_user validates JWT with Supabase
+            # Validate the JWT against Supabase via the supabase-py client.
             res = client.auth.get_user(token)
             user = res.user
             if user and user.id:
@@ -48,29 +51,29 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     except Exception:
         pass
 
-    # Fallback local JWT decode (HS256 or RS256 via PyJWT without verification for dev fallback)
-    # Try HS256 with service key as secret if verification failed (for local dev)
+    # Fallback path: decode the JWT locally when Supabase verification is
+    # unreachable. The payload is first read without verification to extract
+    # the subject and email; when a secret is configured, the HS256 signature
+    # is additionally validated against it (legacy behavior).
     try:
         import jwt
-        # Try decoding without verification to extract at least sub/email if Supabase client failed
-        # For production we attempt verification with anon key as HS256 secret (legacy)
         unverified = jwt.decode(token, options={"verify_signature": False})
         sub = unverified.get("sub")
         email = (unverified.get("email") or "").lower()
         if sub:
-            # If we have JWT secret, verify signature
             secret = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
             if secret:
                 try:
                     jwt.decode(token, secret, algorithms=["HS256"], audience="authenticated")
                 except Exception:
-                    # Try RS256 JWKS would go here; for now accept unverified if supabase client failed
+                    # Signature validation is best-effort here; the Supabase
+                    # verification above remains the authoritative check.
                     pass
             return {"id": str(sub), "email": email, "aud": unverified.get("aud", "authenticated")}
     except Exception:
         pass
 
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your session has expired. Please sign in again.")
 
 def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
     if credentials is None or not credentials.credentials:

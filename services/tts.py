@@ -17,7 +17,8 @@ _supabase: Client = None
 def _get_supabase() -> Client:
     global _supabase
     if _supabase is None:
-        # Re-read env at call time so import order vs load_dotenv() doesn't matter
+        # Resolve configuration at call time so behavior does not depend on
+        # module import order relative to load_dotenv().
         url = os.getenv("SUPABASE_URL") or SUPABASE_URL
         key = os.getenv("SUPABASE_KEY") or SUPABASE_KEY
         _supabase = create_client(url, key)
@@ -25,7 +26,7 @@ def _get_supabase() -> Client:
 
 
 def _resolve_bucket_and_url() -> tuple[str, str | None]:
-    """Return (bucket, base_url) reading env lazily."""
+    """Resolve the storage bucket and base URL from the environment."""
     bucket = os.getenv("SUPABASE_STORAGE_BUCKET") or STORAGE_BUCKET or "audio"
     base_url = os.getenv("SUPABASE_URL") or SUPABASE_URL
     return bucket, base_url
@@ -77,9 +78,9 @@ def get_audio_url(filename: str) -> str | None:
         return None
     bucket, base_url = _resolve_bucket_and_url()
     if base_url:
-        # Primary path — no SDK, no HTTP, just string interpolation
+        # Primary path: construct the public URL directly without SDK or network calls.
         return f"{base_url.rstrip('/')}/storage/v1/object/public/{bucket}/{filename}"
-    # Fallback: try SDK's get_public_url (also zero network, pure formatting)
+    # Fallback: derive the URL via the SDK helper (likewise network-free).
     try:
         supabase = _get_supabase()
         return supabase.storage.from_(bucket).get_public_url(filename)

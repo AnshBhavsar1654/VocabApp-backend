@@ -88,7 +88,7 @@ class QuizSessionResponse(BaseModel):
 class ReviewCreate(BaseModel):
     word_id: UUID
     is_correct: bool
-    self_assessment: str | None = None  # got / missed
+    self_assessment: str | None = None  # Permitted values: "got" | "missed".
     typed_answer: str | None = None
     prompt_lang: str | None = None
 

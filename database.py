@@ -62,7 +62,7 @@ class Review(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=True, index=True)
     word_id = Column(UUID(as_uuid=True), ForeignKey("words.id", ondelete="CASCADE"), nullable=False, index=True)
     is_correct = Column(Boolean, nullable=False)
-    self_assessment = Column(String, nullable=True)  # got / missed
+    self_assessment = Column(String, nullable=True)  # Permitted values: "got" | "missed".
     typed_answer = Column(String, nullable=True)
     prompt_lang = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -72,7 +72,7 @@ class Review(Base):
 class Profile(Base):
     __tablename__ = "profiles"
 
-    id = Column(UUID(as_uuid=True), primary_key=True)  # matches auth.users.id
+    id = Column(UUID(as_uuid=True), primary_key=True)  # References auth.users.id.
     email = Column(String, nullable=False)
     is_admin = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
