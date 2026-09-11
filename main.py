@@ -1,11 +1,14 @@
 import asyncio
 import os
 import random
+import uuid
 from contextlib import asynccontextmanager
 
 import httpx
 import models
+from auth import ADMIN_EMAIL, get_current_user, is_admin
 from database import Group as DBGroup
+from database import Profile as DBProfile
 from database import Word as DBWord
 from database import get_db, word_groups
 from dotenv import load_dotenv
@@ -19,11 +22,37 @@ from sqlalchemy.orm import Session
 load_dotenv()
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+MODE = os.getenv("MODE", "dev").lower()
+# MODE-driven defaults: dev = localhost, prod = vercel/render — single toggle
+if MODE == "dev":
+    _default_frontend = "http://localhost:5173"
+    _default_origins = "http://localhost:5173,http://localhost:3000"
+else:
+    _default_frontend = "https://vocab-app-frontend-rosy.vercel.app"
+    _default_origins = "https://vocab-app-frontend-rosy.vercel.app,https://vocabapp.vercel.app"
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", _default_frontend)
+# allow both local dev and vercel preview
+ALLOWED_ORIGINS = [FRONTEND_URL, "http://localhost:5173", "http://localhost:3000", "https://vocab-app-frontend-rosy.vercel.app", "https://vocabapp.vercel.app"]
+# also support comma-separated env — explicit env overrides mode defaults
+if os.getenv("ALLOWED_ORIGINS"):
+    ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS").split(",")]
+elif MODE == "dev":
+    ALLOWED_ORIGINS = [o.strip() for o in _default_origins.split(",")] + [FRONTEND_URL]
+else:
+    ALLOWED_ORIGINS = [o.strip() for o in _default_origins.split(",")]
+# dedupe
+ALLOWED_ORIGINS = list(dict.fromkeys(ALLOWED_ORIGINS))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _ensure_default_group()
+    # Ensure extension and tables exist (without user)
+    try:
+        from database import Base, engine
+        Base.metadata.create_all(bind=engine)
+    except Exception:
+        pass
     task = asyncio.create_task(_keep_alive())
     yield
     task.cancel()
@@ -45,8 +74,8 @@ app = FastAPI(title="German Vocab App", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -57,39 +86,59 @@ def health_check():
     return {"status": "ok"}
 
 
-def _ensure_default_group():
-    from database import Base, SessionLocal
+@app.get("/auth/me")
+def get_me(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    _ensure_profile(db, user)
+    _ensure_user_default_group(db, user)
+    return {"id": user["id"], "email": user["email"], "is_admin": is_admin(user)}
 
-    # Ensure tables exist (including new reviews table for SRS) — safe to run on every start
+
+def _user_uuid(user: dict):
+    return uuid.UUID(user["id"])
+
+def _ensure_profile(db: Session, user: dict):
+    # First authenticated call persists the user to public.profiles so they
+    # show up in Supabase (auth.users row itself is created by Supabase Auth).
     try:
-        from database import engine
-
-        Base.metadata.create_all(bind=engine)
-    except Exception:
-        pass
-
-    db = SessionLocal()
-    try:
-        existing = db.query(DBGroup).filter(DBGroup.is_default == True).first()
+        uid = _user_uuid(user)
+        existing = db.query(DBProfile).filter(DBProfile.id == uid).first()
         if not existing:
-            default_group = DBGroup(name="Ungrouped", is_default=True)
-            db.add(default_group)
+            db.add(DBProfile(id=uid, email=user.get("email", ""), is_admin=is_admin(user)))
             db.commit()
-    finally:
-        db.close()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _ensure_user_default_group(db: Session, user: dict):
+    _ensure_profile(db, user)
+    uid = _user_uuid(user)
+    existing = db.query(DBGroup).filter(DBGroup.user_id == uid, DBGroup.is_default == True).first()
+    if not existing:
+        default_group = DBGroup(name="Ungrouped", is_default=True, user_id=uid)
+        db.add(default_group)
+        db.commit()
+        db.refresh(default_group)
+        return default_group
+    return existing
 
 
 @app.get("/groups", response_model=list[models.GroupResponse])
-def get_groups(db: Session = Depends(get_db)):
-    groups = db.query(DBGroup).order_by(DBGroup.is_default.desc(), DBGroup.created_at.asc()).all()
+def get_groups(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    _ensure_user_default_group(db, user)
+    uid = _user_uuid(user)
+    groups = db.query(DBGroup).filter(DBGroup.user_id == uid).order_by(DBGroup.is_default.desc(), DBGroup.created_at.asc()).all()
     result = []
     for g in groups:
         if g.is_default:
             word_count = db.query(DBWord).filter(
+                DBWord.user_id == uid,
                 ~DBWord.id.in_(
                     db.query(word_groups.c.word_id)
                     .join(DBGroup, DBGroup.id == word_groups.c.group_id)
-                    .filter(DBGroup.is_default == False)
+                    .filter(DBGroup.user_id == uid, DBGroup.is_default == False)
                 )
             ).count()
         else:
@@ -105,16 +154,18 @@ def get_groups(db: Session = Depends(get_db)):
 
 
 @app.post("/groups", response_model=models.GroupResponse)
-def create_group(group_in: models.GroupCreate, db: Session = Depends(get_db)):
+def create_group(group_in: models.GroupCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    _ensure_user_default_group(db, user)
     name = group_in.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Group name cannot be empty")
 
-    existing = db.query(DBGroup).filter(func.lower(DBGroup.name) == name.lower()).first()
+    existing = db.query(DBGroup).filter(DBGroup.user_id == uid, func.lower(DBGroup.name) == name.lower()).first()
     if existing:
         raise HTTPException(status_code=409, detail="Group with this name already exists")
 
-    group = DBGroup(name=name)
+    group = DBGroup(name=name, user_id=uid)
     db.add(group)
     db.commit()
     db.refresh(group)
@@ -128,8 +179,9 @@ def create_group(group_in: models.GroupCreate, db: Session = Depends(get_db)):
 
 
 @app.patch("/groups/{group_id}", response_model=models.GroupResponse)
-def rename_group(group_id: int, group_in: models.GroupRename, db: Session = Depends(get_db)):
-    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+def rename_group(group_id: uuid.UUID, group_in: models.GroupRename, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    group = db.query(DBGroup).filter(DBGroup.id == group_id, DBGroup.user_id == uid).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
     if group.is_default:
@@ -140,6 +192,7 @@ def rename_group(group_id: int, group_in: models.GroupRename, db: Session = Depe
         raise HTTPException(status_code=400, detail="Group name cannot be empty")
 
     existing = db.query(DBGroup).filter(
+        DBGroup.user_id == uid,
         func.lower(DBGroup.name) == name.lower(),
         DBGroup.id != group_id,
     ).first()
@@ -159,8 +212,9 @@ def rename_group(group_id: int, group_in: models.GroupRename, db: Session = Depe
 
 
 @app.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_group(group_id: int, db: Session = Depends(get_db)):
-    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+def delete_group(group_id: uuid.UUID, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    group = db.query(DBGroup).filter(DBGroup.id == group_id, DBGroup.user_id == uid).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
     if group.is_default:
@@ -172,17 +226,19 @@ def delete_group(group_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/groups/{group_id}/words", response_model=models.GroupWordsResponse)
-def get_group_words(group_id: int, db: Session = Depends(get_db)):
-    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+def get_group_words(group_id: uuid.UUID, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    group = db.query(DBGroup).filter(DBGroup.id == group_id, DBGroup.user_id == uid).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
     if group.is_default:
         words = db.query(DBWord).filter(
+            DBWord.user_id == uid,
             ~DBWord.id.in_(
                 db.query(word_groups.c.word_id)
                 .join(DBGroup, DBGroup.id == word_groups.c.group_id)
-                .filter(DBGroup.is_default == False)
+                .filter(DBGroup.user_id == uid, DBGroup.is_default == False)
             )
         ).order_by(DBWord.created_at.desc()).all()
     else:
@@ -204,14 +260,15 @@ def get_group_words(group_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/groups/{group_id}/words", status_code=status.HTTP_200_OK)
-def add_words_to_group(group_id: int, req: models.WordGroupRequest, db: Session = Depends(get_db)):
-    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+def add_words_to_group(group_id: uuid.UUID, req: models.WordGroupRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    group = db.query(DBGroup).filter(DBGroup.id == group_id, DBGroup.user_id == uid).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    words = db.query(DBWord).filter(DBWord.id.in_(req.word_ids)).all()
+    words = db.query(DBWord).filter(DBWord.id.in_(req.word_ids), DBWord.user_id == uid).all()
     if len(words) != len(req.word_ids):
-        raise HTTPException(status_code=404, detail="One or more words not found")
+        raise HTTPException(status_code=404, detail="One or more words not found or not owned")
 
     for word in words:
         if word not in group.words:
@@ -222,12 +279,13 @@ def add_words_to_group(group_id: int, req: models.WordGroupRequest, db: Session 
 
 
 @app.delete("/groups/{group_id}/words/{word_id}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_word_from_group(group_id: int, word_id: int, db: Session = Depends(get_db)):
-    group = db.query(DBGroup).filter(DBGroup.id == group_id).first()
+def remove_word_from_group(group_id: uuid.UUID, word_id: uuid.UUID, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    group = db.query(DBGroup).filter(DBGroup.id == group_id, DBGroup.user_id == uid).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    word = db.query(DBWord).filter(DBWord.id == word_id).first()
+    word = db.query(DBWord).filter(DBWord.id == word_id, DBWord.user_id == uid).first()
     if not word:
         raise HTTPException(status_code=404, detail="Word not found")
 
@@ -239,7 +297,9 @@ def remove_word_from_group(group_id: int, word_id: int, db: Session = Depends(ge
 
 
 @app.post("/words", response_model=models.WordResponse)
-def add_word(word_in: models.WordCreate, db: Session = Depends(get_db)):
+def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    _ensure_user_default_group(db, user)
     if word_in.source_lang == "de":
         german_word = word_in.text
         english_word = translate_text(word_in.text, "de", "en")
@@ -248,6 +308,7 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db)):
         german_word = translate_text(word_in.text, "en", "de")
 
     existing = db.query(DBWord).filter(
+        DBWord.user_id == uid,
         func.lower(DBWord.english_word) == english_word.lower(),
         func.lower(DBWord.german_word) == german_word.lower()
     ).first()
@@ -261,7 +322,8 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db)):
         english_word=english_word,
         german_word=german_word,
         audio_filename=audio_filename,
-        entry_type=word_in.entry_type
+        entry_type=word_in.entry_type,
+        user_id=uid,
     )
     db.add(new_word)
     db.commit()
@@ -273,8 +335,9 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/words", response_model=list[models.WordResponse])
-def get_words(db: Session = Depends(get_db)):
-    words = db.query(DBWord).order_by(DBWord.created_at.desc()).all()
+def get_words(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    words = db.query(DBWord).filter(DBWord.user_id == uid).order_by(DBWord.created_at.desc()).all()
     results = []
     for w in words:
         r = models.WordResponse.model_validate(w)
@@ -285,8 +348,9 @@ def get_words(db: Session = Depends(get_db)):
 
 
 @app.delete("/words/{word_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_word(word_id: int, db: Session = Depends(get_db)):
-    word = db.query(DBWord).filter(DBWord.id == word_id).first()
+def delete_word(word_id: uuid.UUID, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    word = db.query(DBWord).filter(DBWord.id == word_id, DBWord.user_id == uid).first()
     if not word:
         raise HTTPException(status_code=404, detail="Word not found")
 
@@ -298,8 +362,9 @@ def delete_word(word_id: int, db: Session = Depends(get_db)):
 
 
 @app.patch("/words/{word_id}", response_model=models.WordResponse)
-def update_word(word_id: int, word_in: models.WordUpdate, db: Session = Depends(get_db)):
-    word = db.query(DBWord).filter(DBWord.id == word_id).first()
+def update_word(word_id: uuid.UUID, word_in: models.WordUpdate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    word = db.query(DBWord).filter(DBWord.id == word_id, DBWord.user_id == uid).first()
     if not word:
         raise HTTPException(status_code=404, detail="Word not found")
 
@@ -326,8 +391,9 @@ def update_word(word_id: int, word_in: models.WordUpdate, db: Session = Depends(
 
 
 @app.get("/quiz/next", response_model=models.QuizNextResponse)
-def get_quiz_next(db: Session = Depends(get_db)):
-    words = db.query(DBWord).all()
+def get_quiz_next(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    words = db.query(DBWord).filter(DBWord.user_id == uid).all()
     if not words:
         raise HTTPException(status_code=404, detail="No words available for quiz")
 
@@ -345,17 +411,15 @@ def get_quiz_next(db: Session = Depends(get_db)):
 
 
 @app.get("/quiz/session", response_model=models.QuizSessionResponse)
-def get_quiz_session(size: int = 10, db: Session = Depends(get_db)):
-    # Session endpoint — production ready: asks # questions (max 20), handles dedupe
+def get_quiz_session(size: int = 10, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     if size < 1 or size > 20:
         raise HTTPException(status_code=400, detail="size must be between 1 and 20")
-    words = db.query(DBWord).all()
+    uid = _user_uuid(user)
+    words = db.query(DBWord).filter(DBWord.user_id == uid).all()
     if not words:
         raise HTTPException(status_code=404, detail="No words available for quiz")
     if len(words) < size and len(words) < 10:
-        # Enforce app rule: need at least 10 words to start a meaningful session
         raise HTTPException(status_code=400, detail=f"Need at least 10 words to start a session (have {len(words)})")
-    # Allow smaller session if vocab is limited but >=10, else cap to vocab size
     actual = min(size, len(words))
     chosen = random.sample(words, actual) if actual <= len(words) else [random.choice(words) for _ in range(actual)]
     questions = []
@@ -375,8 +439,9 @@ def get_quiz_session(size: int = 10, db: Session = Depends(get_db)):
 
 
 @app.post("/quiz/check", response_model=models.QuizCheckResponse)
-def check_quiz_answer(req: models.QuizCheckRequest, db: Session = Depends(get_db)):
-    word = db.query(DBWord).filter(DBWord.id == req.id).first()
+def check_quiz_answer(req: models.QuizCheckRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    word = db.query(DBWord).filter(DBWord.id == req.id, DBWord.user_id == uid).first()
     if not word:
         raise HTTPException(status_code=404, detail="Word not found")
 
@@ -395,11 +460,11 @@ def check_quiz_answer(req: models.QuizCheckRequest, db: Session = Depends(get_db
 
 
 @app.post("/quiz/record", response_model=models.ReviewResponse)
-def record_review(req: models.ReviewCreate, db: Session = Depends(get_db)):
-    # Immediate backend for SRS: records Got/Missed + typed result, even before scheduler exists
+def record_review(req: models.ReviewCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     from database import Review
 
-    word = db.query(DBWord).filter(DBWord.id == req.word_id).first()
+    uid = _user_uuid(user)
+    word = db.query(DBWord).filter(DBWord.id == req.word_id, DBWord.user_id == uid).first()
     if not word:
         raise HTTPException(status_code=404, detail="Word not found")
     if req.self_assessment and req.self_assessment not in ("got", "missed"):
@@ -407,6 +472,7 @@ def record_review(req: models.ReviewCreate, db: Session = Depends(get_db)):
 
     review = Review(
         word_id=req.word_id,
+        user_id=uid,
         is_correct=req.is_correct,
         self_assessment=req.self_assessment,
         typed_answer=req.typed_answer,

@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -19,14 +20,14 @@ class WordUpdate(BaseModel):
     german_word: str | None = None
 
 class GroupInfo(BaseModel):
-    id: int
+    id: UUID
     name: str
 
     class Config:
         from_attributes = True
 
 class WordResponse(WordBase):
-    id: int
+    id: UUID
     created_at: datetime
     audio_url: str | None = None
     groups: list[GroupInfo] = []
@@ -41,7 +42,7 @@ class GroupRename(BaseModel):
     name: str
 
 class GroupResponse(BaseModel):
-    id: int
+    id: UUID
     name: str
     is_default: bool
     created_at: datetime
@@ -51,7 +52,7 @@ class GroupResponse(BaseModel):
         from_attributes = True
 
 class GroupWordsResponse(BaseModel):
-    id: int
+    id: UUID
     name: str
     is_default: bool
     words: list[WordResponse]
@@ -60,23 +61,23 @@ class GroupWordsResponse(BaseModel):
         from_attributes = True
 
 class WordGroupRequest(BaseModel):
-    word_ids: list[int]
+    word_ids: list[UUID]
 
 class QuizNextResponse(BaseModel):
-    id: int
+    id: UUID
     prompt_word: str
     prompt_lang: str
-    audio_url: str
+    audio_url: str | None = None
 
 class QuizCheckRequest(BaseModel):
-    id: int
+    id: UUID
     prompt_lang: str
     user_answer: str
 
 class QuizCheckResponse(BaseModel):
     correct: bool
     correct_answer: str
-    audio_url: str
+    audio_url: str | None = None
 
 
 class QuizSessionResponse(BaseModel):
@@ -85,7 +86,7 @@ class QuizSessionResponse(BaseModel):
 
 
 class ReviewCreate(BaseModel):
-    word_id: int
+    word_id: UUID
     is_correct: bool
     self_assessment: str | None = None  # got / missed
     typed_answer: str | None = None
@@ -93,8 +94,8 @@ class ReviewCreate(BaseModel):
 
 
 class ReviewResponse(BaseModel):
-    id: int
-    word_id: int
+    id: UUID
+    word_id: UUID
     is_correct: bool
     self_assessment: str | None = None
     created_at: datetime
