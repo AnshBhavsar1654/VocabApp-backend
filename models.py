@@ -77,3 +77,27 @@ class QuizCheckResponse(BaseModel):
     correct: bool
     correct_answer: str
     audio_url: str
+
+
+class QuizSessionResponse(BaseModel):
+    questions: list[QuizNextResponse]
+    size: int
+
+
+class ReviewCreate(BaseModel):
+    word_id: int
+    is_correct: bool
+    self_assessment: str | None = None  # got / missed
+    typed_answer: str | None = None
+    prompt_lang: str | None = None
+
+
+class ReviewResponse(BaseModel):
+    id: int
+    word_id: int
+    is_correct: bool
+    self_assessment: str | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

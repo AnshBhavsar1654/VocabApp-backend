@@ -51,6 +51,19 @@ class Group(Base):
     words = relationship("Word", secondary=word_groups, back_populates="groups")
 
 
+class Review(Base):
+    __tablename__ = "reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    word_id = Column(Integer, ForeignKey("words.id", ondelete="CASCADE"), nullable=False, index=True)
+    is_correct = Column(Boolean, nullable=False)
+    self_assessment = Column(String, nullable=True)  # got / missed
+    typed_answer = Column(String, nullable=True)
+    prompt_lang = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    word = relationship("Word")
+
+
 def get_db():
     db = SessionLocal()
     try:

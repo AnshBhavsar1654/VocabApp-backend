@@ -58,7 +58,16 @@ def health_check():
 
 
 def _ensure_default_group():
-    from database import SessionLocal
+    from database import Base, SessionLocal
+
+    # Ensure tables exist (including new reviews table for SRS) — safe to run on every start
+    try:
+        from database import engine
+
+        Base.metadata.create_all(bind=engine)
+    except Exception:
+        pass
+
     db = SessionLocal()
     try:
         existing = db.query(DBGroup).filter(DBGroup.is_default == True).first()
@@ -335,6 +344,36 @@ def get_quiz_next(db: Session = Depends(get_db)):
     )
 
 
+@app.get("/quiz/session", response_model=models.QuizSessionResponse)
+def get_quiz_session(size: int = 10, db: Session = Depends(get_db)):
+    # Session endpoint — production ready: asks # questions (max 20), handles dedupe
+    if size < 1 or size > 20:
+        raise HTTPException(status_code=400, detail="size must be between 1 and 20")
+    words = db.query(DBWord).all()
+    if not words:
+        raise HTTPException(status_code=404, detail="No words available for quiz")
+    if len(words) < size and len(words) < 10:
+        # Enforce app rule: need at least 10 words to start a meaningful session
+        raise HTTPException(status_code=400, detail=f"Need at least 10 words to start a session (have {len(words)})")
+    # Allow smaller session if vocab is limited but >=10, else cap to vocab size
+    actual = min(size, len(words))
+    chosen = random.sample(words, actual) if actual <= len(words) else [random.choice(words) for _ in range(actual)]
+    questions = []
+    for w in chosen:
+        lang = random.choice(["de", "en"])
+        prompt_word = w.german_word if lang == "de" else w.english_word
+        questions.append(
+            models.QuizNextResponse(
+                id=w.id,
+                prompt_word=prompt_word,
+                prompt_lang=lang,
+                audio_url=get_audio_url(w.audio_filename),
+            )
+        )
+    random.shuffle(questions)
+    return models.QuizSessionResponse(questions=questions, size=actual)
+
+
 @app.post("/quiz/check", response_model=models.QuizCheckResponse)
 def check_quiz_answer(req: models.QuizCheckRequest, db: Session = Depends(get_db)):
     word = db.query(DBWord).filter(DBWord.id == req.id).first()
@@ -353,6 +392,30 @@ def check_quiz_answer(req: models.QuizCheckRequest, db: Session = Depends(get_db
         correct_answer=correct_answer,
         audio_url=get_audio_url(word.audio_filename)
     )
+
+
+@app.post("/quiz/record", response_model=models.ReviewResponse)
+def record_review(req: models.ReviewCreate, db: Session = Depends(get_db)):
+    # Immediate backend for SRS: records Got/Missed + typed result, even before scheduler exists
+    from database import Review
+
+    word = db.query(DBWord).filter(DBWord.id == req.word_id).first()
+    if not word:
+        raise HTTPException(status_code=404, detail="Word not found")
+    if req.self_assessment and req.self_assessment not in ("got", "missed"):
+        raise HTTPException(status_code=400, detail="self_assessment must be 'got' or 'missed'")
+
+    review = Review(
+        word_id=req.word_id,
+        is_correct=req.is_correct,
+        self_assessment=req.self_assessment,
+        typed_answer=req.typed_answer,
+        prompt_lang=req.prompt_lang,
+    )
+    db.add(review)
+    db.commit()
+    db.refresh(review)
+    return review
 
 
 if __name__ == "__main__":
