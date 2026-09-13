@@ -23,27 +23,29 @@ load_dotenv()
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 MODE = os.getenv("MODE", "dev").lower()
-# Environment defaults selected by MODE: local development origins for "dev",
-# production (Vercel/Render) origins otherwise. A single MODE value controls both.
-if MODE == "dev":
-    _default_frontend = "http://localhost:5173"
-    _default_origins = "http://localhost:5173,http://localhost:3000"
-else:
-    _default_frontend = "https://vocab-app-frontend-rosy.vercel.app"
-    _default_origins = "https://vocab-app-frontend-rosy.vercel.app,https://vocabapp.vercel.app"
+# Always allow local dev + known production frontends by default, regardless
+# of MODE. Relying on MODE alone caused production CORS failures on Render
+# when MODE defaulted to "dev" (only localhost allowed) and ALLOWED_ORIGINS
+# was not set in the Render dashboard (.env is gitignored, so Render never
+# sees it). An explicit ALLOWED_ORIGINS env value *adds to* these defaults.
+_DEFAULT_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://vocab-app-frontend-rosy.vercel.app",
+    "https://vocabapp.vercel.app",
+]
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", _default_frontend)
-# Permit local development origins alongside the production deployments.
-ALLOWED_ORIGINS = [FRONTEND_URL, "http://localhost:5173", "http://localhost:3000", "https://vocab-app-frontend-rosy.vercel.app", "https://vocabapp.vercel.app"]
-# An explicit ALLOWED_ORIGINS value overrides the MODE-derived defaults.
-if os.getenv("ALLOWED_ORIGINS"):
-    ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS").split(",")]
-elif MODE == "dev":
-    ALLOWED_ORIGINS = [o.strip() for o in _default_origins.split(",")] + [FRONTEND_URL]
-else:
-    ALLOWED_ORIGINS = [o.strip() for o in _default_origins.split(",")]
-# Remove duplicates while preserving order.
-ALLOWED_ORIGINS = list(dict.fromkeys(ALLOWED_ORIGINS))
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip() or (
+    "http://localhost:5173" if MODE == "dev"
+    else "https://vocab-app-frontend-rosy.vercel.app"
+)
+# Merge explicit env origins with the safe defaults (dedupe, preserve order).
+_env_origins = [o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+ALLOWED_ORIGINS = list(dict.fromkeys(
+    [o.rstrip("/") for o in _DEFAULT_ORIGINS] + ([FRONTEND_URL.rstrip("/")] if FRONTEND_URL else []) + _env_origins
+))
+# Allow Vercel preview deployments (e.g. vocab-app-frontend-xyz.vercel.app).
+ALLOW_ORIGIN_REGEX = r"https://.*\.vercel\.app"
 
 
 @asynccontextmanager
@@ -53,6 +55,11 @@ async def lifespan(app: FastAPI):
     try:
         from database import Base, engine
         Base.metadata.create_all(bind=engine)
+        # Lightweight migration for existing deployments: create_all never
+        # ALTERs tables, so newer columns are added idempotently here.
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE groups ADD COLUMN IF NOT EXISTS word_order JSONB"))
     except Exception:
         pass
     task = asyncio.create_task(_keep_alive())
@@ -77,6 +84,7 @@ app = FastAPI(title="German Vocab App", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -254,6 +262,8 @@ def get_group_words(group_id: uuid.UUID, db: Session = Depends(get_db), user: di
         r.groups = [models.GroupInfo(id=g.id, name=g.name) for g in w.groups]
         word_responses.append(r)
 
+    _apply_saved_order(group, word_responses)
+
     return models.GroupWordsResponse(
         id=group.id,
         name=group.name,
@@ -297,6 +307,39 @@ def remove_word_from_group(group_id: uuid.UUID, word_id: uuid.UUID, db: Session 
         db.commit()
 
     return None
+
+
+def _apply_saved_order(group, word_responses):
+    # Sort a group's cards by the manually saved drag order. Words missing
+    # from the list (newly added since the last reorder) keep their relative
+    # order at the end (stable sort preserves the incoming sequence).
+    order = getattr(group, "word_order", None) or []
+    if not order:
+        return word_responses
+    pos = {str(wid): i for i, wid in enumerate(order)}
+    word_responses.sort(key=lambda r: pos.get(str(r.id), len(pos)))
+    return word_responses
+
+
+@app.patch("/groups/{group_id}/order", status_code=status.HTTP_200_OK)
+def set_group_word_order(group_id: uuid.UUID, req: models.GroupWordOrder, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    uid = _user_uuid(user)
+    group = db.query(DBGroup).filter(DBGroup.id == group_id, DBGroup.user_id == uid).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found.")
+
+    # Persist only the user's own words, deduped, order preserved. Membership
+    # is not enforced here: the read path sorts only current members, so stale
+    # ids are harmless (covers remove-after-reorder races).
+    owned = {w.id for w in db.query(DBWord.id).filter(DBWord.user_id == uid).all()}
+    clean, seen = [], set()
+    for wid in req.word_ids:
+        if wid in owned and wid not in seen:
+            seen.add(wid)
+            clean.append(str(wid))
+    group.word_order = clean
+    db.commit()
+    return {"status": "ok"}
 
 
 @app.post("/words", response_model=models.WordResponse)
@@ -390,6 +433,7 @@ def update_word(word_id: uuid.UUID, word_in: models.WordUpdate, db: Session = De
 
     response = models.WordResponse.model_validate(word)
     response.audio_url = get_audio_url(word.audio_filename)
+    response.groups = [models.GroupInfo(id=g.id, name=g.name) for g in word.groups]
     return response
 
 

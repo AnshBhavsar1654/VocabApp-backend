@@ -63,6 +63,10 @@ class GroupWordsResponse(BaseModel):
 class WordGroupRequest(BaseModel):
     word_ids: list[UUID]
 
+
+class GroupWordOrder(BaseModel):
+    word_ids: list[UUID]
+
 class QuizNextResponse(BaseModel):
     id: UUID
     prompt_word: str

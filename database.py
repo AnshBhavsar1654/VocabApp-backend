@@ -2,7 +2,7 @@ import os
 import uuid
 
 from dotenv import load_dotenv
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table, create_engine
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, String, Table, create_engine
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -35,7 +35,13 @@ class Word(Base):
     __tablename__ = "words"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=True, index=True)
+    # Plain UUID, no SQLAlchemy ForeignKey to auth.users: that table lives in
+    # the Supabase auth schema and is not part of Base.metadata, so a
+    # ForeignKey("auth.users.id") makes every flush fail in
+    # sort_tables with NoReferencedTableError (seen on PATCH /words/{id}).
+    # The Postgres-level FK (if created via dashboard/migration) still
+    # enforces integrity; the ORM just doesn't need to model it.
+    user_id = Column(UUID(as_uuid=True), nullable=True, index=True)
     english_word = Column(String, index=True, nullable=False)
     german_word = Column(String, index=True, nullable=False)
     audio_filename = Column(String, nullable=False)
@@ -48,10 +54,15 @@ class Group(Base):
     __tablename__ = "groups"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=True, index=True)
+    # See Word.user_id: no ORM-level FK to auth.users (not in metadata).
+    user_id = Column(UUID(as_uuid=True), nullable=True, index=True)
     name = Column(String, nullable=False)
     is_default = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Manual card order for the group's word list (drag-to-reorder in the UI).
+    # Ordered list of word-id strings; words missing from the list (e.g. newly
+    # added) are appended at the end on read. Nullable = keep server default.
+    word_order = Column(JSON, nullable=True, default=None)
     words = relationship("Word", secondary=word_groups, back_populates="groups")
 
 
@@ -59,7 +70,8 @@ class Review(Base):
     __tablename__ = "reviews"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=True, index=True)
+    # See Word.user_id: no ORM-level FK to auth.users (not in metadata).
+    user_id = Column(UUID(as_uuid=True), nullable=True, index=True)
     word_id = Column(UUID(as_uuid=True), ForeignKey("words.id", ondelete="CASCADE"), nullable=False, index=True)
     is_correct = Column(Boolean, nullable=False)
     self_assessment = Column(String, nullable=True)  # Permitted values: "got" | "missed".
