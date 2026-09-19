@@ -46,6 +46,9 @@ class Word(Base):
     german_word = Column(String, index=True, nullable=False)
     audio_filename = Column(String, nullable=False)
     entry_type = Column(String, index=True, nullable=False, default="word")
+    # Linguistic metadata (nullable = unknown / not applicable).
+    # pos: noun | verb | adjective | adverb | phrase | other
+    pos = Column(String, nullable=True, default=None)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     groups = relationship("Group", secondary=word_groups, back_populates="words")
 
@@ -88,6 +91,25 @@ class Profile(Base):
     email = Column(String, nullable=False)
     is_admin = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class GrammarCache(Base):
+    """Shared auto-suggest cache: one row per German lemma.
+
+    First resolution runs the services.grammar cascade (DWDS -> heuristic);
+    every later lookup is DB-only, which is what makes suggestions
+    deterministic. User edits live on words.pos — this table is only the
+    suggestion source, never user data.
+    """
+
+    __tablename__ = "grammar_cache"
+
+    lemma = Column(String, primary_key=True)
+    pos = Column(String, nullable=True)
+    source = Column(String, nullable=False, default="none")
+    confidence = Column(String, nullable=False, default="none")
+    ambiguous = Column(Boolean, nullable=False, default=False)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 def get_db():

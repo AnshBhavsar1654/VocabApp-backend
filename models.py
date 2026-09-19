@@ -9,15 +9,20 @@ class WordBase(BaseModel):
     german_word: str
     audio_filename: str
     entry_type: str = "word"
+    # pos: noun | verb | adjective | adverb | phrase | other (None = unknown)
+    pos: str | None = None
 
 class WordCreate(BaseModel):
     text: str
     source_lang: str
     entry_type: str = "word"
+    # Optional manual override for the auto-suggest (AddWordForm dropdown).
+    pos: str | None = None
 
 class WordUpdate(BaseModel):
     english_word: str | None = None
     german_word: str | None = None
+    pos: str | None = None
 
 class GroupInfo(BaseModel):
     id: UUID
@@ -72,6 +77,7 @@ class QuizNextResponse(BaseModel):
     prompt_word: str
     prompt_lang: str
     audio_url: str | None = None
+    pos: str | None = None
 
 class QuizCheckRequest(BaseModel):
     id: UUID
@@ -82,6 +88,7 @@ class QuizCheckResponse(BaseModel):
     correct: bool
     correct_answer: str
     audio_url: str | None = None
+    pos: str | None = None
 
 
 class QuizSessionResponse(BaseModel):

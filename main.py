@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 import models
 from auth import ADMIN_EMAIL, get_current_user, is_admin
+from database import GrammarCache as DBGrammarCache
 from database import Group as DBGroup
 from database import Profile as DBProfile
 from database import Word as DBWord
@@ -14,6 +15,7 @@ from database import get_db, word_groups
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from services import grammar
 from services.translation import translate_text
 from services.tts import delete_audio, generate_audio, get_audio_url
 from sqlalchemy import func
@@ -60,6 +62,7 @@ async def lifespan(app: FastAPI):
         from sqlalchemy import text
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE groups ADD COLUMN IF NOT EXISTS word_order JSONB"))
+            conn.execute(text("ALTER TABLE words ADD COLUMN IF NOT EXISTS pos TEXT"))
     except Exception:
         pass
     task = asyncio.create_task(_keep_alive())
@@ -121,6 +124,48 @@ def _ensure_profile(db: Session, user: dict):
             db.rollback()
         except Exception:
             pass
+
+
+POS_VALUES = {"noun", "verb", "adjective", "adverb", "phrase", "other"}
+
+
+def _resolve_grammar(db: Session, german_word: str, pos_override=None):
+    """Return pos for a German word.
+
+    Explicit user overrides always win (validated). Otherwise: shared
+    grammar_cache -> services.grammar cascade (which itself never raises).
+    """
+    if pos_override in POS_VALUES:
+        return pos_override
+
+    lemma = grammar.normalize_german(german_word)
+    if not lemma:
+        return None
+    try:
+        cached = db.query(DBGrammarCache).filter(DBGrammarCache.lemma == lemma).first()
+        if cached:
+            return cached.pos
+    except Exception:
+        pass
+    try:
+        s = grammar.suggest(german_word)
+    except Exception:
+        return None
+    try:
+        db.merge(DBGrammarCache(
+            lemma=lemma,
+            pos=s.get("pos"),
+            source=s.get("source", "none"),
+            confidence=s.get("confidence", "none"),
+            ambiguous=bool(s.get("ambiguous")),
+        ))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    return s.get("pos")
 
 
 def _ensure_user_default_group(db: Session, user: dict):
@@ -364,12 +409,15 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
 
     audio_filename = generate_audio(german_word)
 
+    pos = _resolve_grammar(db, german_word, word_in.pos)
+
     new_word = DBWord(
         english_word=english_word,
         german_word=german_word,
         audio_filename=audio_filename,
         entry_type=word_in.entry_type,
         user_id=uid,
+        pos=pos,
     )
     db.add(new_word)
     db.commit()
@@ -428,6 +476,15 @@ def update_word(word_id: uuid.UUID, word_in: models.WordUpdate, db: Session = De
     if word_in.english_word is not None:
         word.english_word = word_in.english_word
 
+    # Manual pos override wins. On German-text change without override,
+    # re-run the cascade but only fill in (never wipe a manual value with None).
+    if word_in.pos in POS_VALUES:
+        word.pos = word_in.pos
+    elif german_changed:
+        pos = _resolve_grammar(db, word.german_word)
+        if pos is not None:
+            word.pos = pos
+
     db.commit()
     db.refresh(word)
 
@@ -453,7 +510,8 @@ def get_quiz_next(db: Session = Depends(get_db), user: dict = Depends(get_curren
         id=word.id,
         prompt_word=prompt_word,
         prompt_lang=lang,
-        audio_url=get_audio_url(word.audio_filename)
+        audio_url=get_audio_url(word.audio_filename),
+        pos=word.pos,
     )
 
 
@@ -479,6 +537,7 @@ def get_quiz_session(size: int = 10, db: Session = Depends(get_db), user: dict =
                 prompt_word=prompt_word,
                 prompt_lang=lang,
                 audio_url=get_audio_url(w.audio_filename),
+                pos=w.pos,
             )
         )
     random.shuffle(questions)
@@ -502,7 +561,8 @@ def check_quiz_answer(req: models.QuizCheckRequest, db: Session = Depends(get_db
     return models.QuizCheckResponse(
         correct=is_correct,
         correct_answer=correct_answer,
-        audio_url=get_audio_url(word.audio_filename)
+        audio_url=get_audio_url(word.audio_filename),
+        pos=word.pos,
     )
 
 
