@@ -47,7 +47,14 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             res = client.auth.get_user(token)
             user = res.user
             if user and user.id:
-                return {"id": str(user.id), "email": (user.email or "").lower(), "aud": user.aud if hasattr(user, 'aud') else "authenticated"}
+                meta = getattr(user, "user_metadata", {}) or {}
+                full_name = meta.get("full_name") or meta.get("name") or ""
+                return {
+                    "id": str(user.id),
+                    "email": (user.email or "").lower(),
+                    "full_name": full_name,
+                    "aud": user.aud if hasattr(user, 'aud') else "authenticated",
+                }
     except Exception:
         pass
 
@@ -61,6 +68,8 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
         sub = unverified.get("sub")
         email = (unverified.get("email") or "").lower()
         if sub:
+            meta = unverified.get("user_metadata", {}) or {}
+            full_name = meta.get("full_name") or meta.get("name") or ""
             secret = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
             if secret:
                 try:
@@ -69,7 +78,12 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
                     # Signature validation is best-effort here; the Supabase
                     # verification above remains the authoritative check.
                     pass
-            return {"id": str(sub), "email": email, "aud": unverified.get("aud", "authenticated")}
+            return {
+                "id": str(sub),
+                "email": email,
+                "full_name": full_name,
+                "aud": unverified.get("aud", "authenticated"),
+            }
     except Exception:
         pass
 

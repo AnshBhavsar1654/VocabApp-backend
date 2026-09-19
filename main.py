@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE groups ADD COLUMN IF NOT EXISTS word_order JSONB"))
             conn.execute(text("ALTER TABLE words ADD COLUMN IF NOT EXISTS pos TEXT"))
+            conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS full_name TEXT"))
     except Exception:
         pass
     task = asyncio.create_task(_keep_alive())
@@ -103,7 +104,12 @@ def health_check():
 def get_me(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     _ensure_profile(db, user)
     _ensure_user_default_group(db, user)
-    return {"id": user["id"], "email": user["email"], "is_admin": is_admin(user)}
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "full_name": user.get("full_name", ""),
+        "is_admin": is_admin(user),
+    }
 
 
 def _user_uuid(user: dict):
@@ -116,8 +122,12 @@ def _ensure_profile(db: Session, user: dict):
     try:
         uid = _user_uuid(user)
         existing = db.query(DBProfile).filter(DBProfile.id == uid).first()
+        full_name = user.get("full_name") or None
         if not existing:
-            db.add(DBProfile(id=uid, email=user.get("email", ""), is_admin=is_admin(user)))
+            db.add(DBProfile(id=uid, email=user.get("email", ""), full_name=full_name, is_admin=is_admin(user)))
+            db.commit()
+        elif full_name and not existing.full_name:
+            existing.full_name = full_name
             db.commit()
     except Exception:
         try:

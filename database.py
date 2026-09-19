@@ -89,6 +89,7 @@ class Profile(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True)  # References auth.users.id.
     email = Column(String, nullable=False)
+    full_name = Column(String, nullable=True, default=None)
     is_admin = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
