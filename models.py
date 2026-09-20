@@ -7,7 +7,7 @@ from pydantic import BaseModel
 class WordBase(BaseModel):
     english_word: str
     german_word: str
-    audio_filename: str
+    audio_filename: str | None = ""
     entry_type: str = "word"
     # pos: noun | verb | adjective | adverb | phrase | other (None = unknown)
     pos: str | None = None

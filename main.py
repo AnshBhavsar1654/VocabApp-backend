@@ -3,36 +3,43 @@ import os
 import random
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 import models
-from auth import ADMIN_EMAIL, get_current_user, is_admin
+from auth import get_current_user, is_admin
 from database import GrammarCache as DBGrammarCache
 from database import Group as DBGroup
 from database import Profile as DBProfile
 from database import Word as DBWord
 from database import get_db, word_groups
-from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
 from services import grammar
 from services.translation import translate_text
 from services.tts import delete_audio, generate_audio, get_audio_url
-from sqlalchemy import func
-from sqlalchemy.orm import Session
 
-load_dotenv()
+env_path = Path(__file__).resolve().parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 MODE = os.getenv("MODE", "dev").lower()
-# Always allow local dev + known production frontends by default, regardless
-# of MODE. Relying on MODE alone caused production CORS failures on Render
-# when MODE defaulted to "dev" (only localhost allowed) and ALLOWED_ORIGINS
-# was not set in the Render dashboard (.env is gitignored, so Render never
-# sees it). An explicit ALLOWED_ORIGINS env value *adds to* these defaults.
+# Known origins for local development and production deployments.
 _DEFAULT_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5174",
     "https://vocab-app-frontend-rosy.vercel.app",
     "https://vocabapp.vercel.app",
 ]
@@ -41,13 +48,15 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip() or (
     "http://localhost:5173" if MODE == "dev"
     else "https://vocab-app-frontend-rosy.vercel.app"
 )
-# Merge explicit env origins with the safe defaults (dedupe, preserve order).
 _env_origins = [o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# Allowing ["*"] with allow_credentials=True causes Starlette CORSMiddleware
+# to dynamically mirror back the caller's Origin in Access-Control-Allow-Origin.
+# This permanently prevents any CORS mismatch across local ports, Vercel preview
+# deployments, and custom domains.
 ALLOWED_ORIGINS = list(dict.fromkeys(
-    [o.rstrip("/") for o in _DEFAULT_ORIGINS] + ([FRONTEND_URL.rstrip("/")] if FRONTEND_URL else []) + _env_origins
+    ["*"] + [o.rstrip("/") for o in _DEFAULT_ORIGINS] + ([FRONTEND_URL.rstrip("/")] if FRONTEND_URL else []) + _env_origins
 ))
-# Allow Vercel preview deployments (e.g. vocab-app-frontend-xyz.vercel.app).
-ALLOW_ORIGIN_REGEX = r"https://.*\.vercel\.app"
+ALLOW_ORIGIN_REGEX = r"^https?://.*$"
 
 
 @asynccontextmanager
@@ -64,6 +73,7 @@ async def lifespan(app: FastAPI):
             conn.execute(text("ALTER TABLE groups ADD COLUMN IF NOT EXISTS word_order JSONB"))
             conn.execute(text("ALTER TABLE words ADD COLUMN IF NOT EXISTS pos TEXT"))
             conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS full_name TEXT"))
+            conn.execute(text("ALTER TABLE words ALTER COLUMN audio_filename DROP NOT NULL"))
     except Exception:
         pass
     task = asyncio.create_task(_keep_alive())
@@ -83,8 +93,55 @@ async def _keep_alive():
             pass
 
 
+class CatchAllExceptionsMiddleware:
+    """Catches unhandled exceptions inside the ASGI application and returns a JSON 500.
+
+    In Starlette/FastAPI, unhandled exceptions that escape to ServerErrorMiddleware
+    are rendered without CORS headers, causing browsers to report a CORS policy error
+    whenever a 500 error occurs.
+    Adding this middleware BEFORE CORSMiddleware puts it INSIDE CORSMiddleware in the
+    ASGI stack. Any 500 response generated here passes out through CORSMiddleware,
+    guaranteeing that CORS headers are ALWAYS present on error responses.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def custom_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, custom_send)
+        except Exception as exc:
+            import logging
+            logging.exception("Unhandled server error caught by middleware: %s", exc)
+            if not response_started:
+                response = JSONResponse(
+                    status_code=500,
+                    content={"detail": f"Internal Server Error: {str(exc)}"}
+                )
+                await response(scope, receive, send)
+            else:
+                raise
+
+
 app = FastAPI(title="German Vocab App", lifespan=lifespan)
 
+# Middleware order in FastAPI:
+# Middleware added FIRST sits INSIDE middleware added LATER.
+# 1. CatchAllExceptionsMiddleware sits INSIDE CORSMiddleware.
+app.add_middleware(CatchAllExceptionsMiddleware)
+
+# 2. CORSMiddleware sits on the OUTSIDE, wrapping all responses with CORS headers.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -92,7 +149,24 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc: Exception):
+    import logging
+    logging.exception("Global exception handler caught: %s", exc)
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)}"}
+    )
+    origin = request.headers.get("origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.get("/health")
@@ -181,14 +255,24 @@ def _resolve_grammar(db: Session, german_word: str, pos_override=None):
 def _ensure_user_default_group(db: Session, user: dict):
     _ensure_profile(db, user)
     uid = _user_uuid(user)
-    existing = db.query(DBGroup).filter(DBGroup.user_id == uid, DBGroup.is_default == True).first()
-    if not existing:
-        default_group = DBGroup(name="Ungrouped", is_default=True, user_id=uid)
-        db.add(default_group)
-        db.commit()
-        db.refresh(default_group)
-        return default_group
-    return existing
+    try:
+        existing = db.query(DBGroup).filter(DBGroup.user_id == uid, DBGroup.is_default.is_(True)).first()
+        if not existing:
+            default_group = DBGroup(name="Ungrouped", is_default=True, user_id=uid)
+            db.add(default_group)
+            db.commit()
+            db.refresh(default_group)
+            return default_group
+        return existing
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            return db.query(DBGroup).filter(DBGroup.user_id == uid, DBGroup.is_default.is_(True)).first()
+        except Exception:
+            return None
 
 
 @app.get("/groups", response_model=list[models.GroupResponse])
@@ -204,7 +288,7 @@ def get_groups(db: Session = Depends(get_db), user: dict = Depends(get_current_u
                 ~DBWord.id.in_(
                     db.query(word_groups.c.word_id)
                     .join(DBGroup, DBGroup.id == word_groups.c.group_id)
-                    .filter(DBGroup.user_id == uid, DBGroup.is_default == False)
+                    .filter(DBGroup.user_id == uid, DBGroup.is_default.is_(False))
                 )
             ).count()
         else:
@@ -304,7 +388,7 @@ def get_group_words(group_id: uuid.UUID, db: Session = Depends(get_db), user: di
             ~DBWord.id.in_(
                 db.query(word_groups.c.word_id)
                 .join(DBGroup, DBGroup.id == word_groups.c.group_id)
-                .filter(DBGroup.user_id == uid, DBGroup.is_default == False)
+                .filter(DBGroup.user_id == uid, DBGroup.is_default.is_(False))
             )
         ).order_by(DBWord.created_at.desc()).all()
     else:
@@ -401,12 +485,17 @@ def set_group_word_order(group_id: uuid.UUID, req: models.GroupWordOrder, db: Se
 def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     uid = _user_uuid(user)
     _ensure_user_default_group(db, user)
+
+    text = (word_in.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Word text cannot be empty.")
+
     if word_in.source_lang == "de":
-        german_word = word_in.text
-        english_word = translate_text(word_in.text, "de", "en")
+        german_word = text
+        english_word = translate_text(text, "de", "en")
     else:
-        english_word = word_in.text
-        german_word = translate_text(word_in.text, "en", "de")
+        english_word = text
+        german_word = translate_text(text, "en", "de")
 
     existing = db.query(DBWord).filter(
         DBWord.user_id == uid,
@@ -417,7 +506,12 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This word is already in your vocabulary list.")
 
-    audio_filename = generate_audio(german_word)
+    audio_filename = ""
+    try:
+        audio_filename = generate_audio(german_word) or ""
+    except Exception as e:
+        print(f"Audio generation failed for '{german_word}': {e}")
+        audio_filename = ""
 
     pos = _resolve_grammar(db, german_word, word_in.pos)
 
@@ -430,8 +524,16 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
         pos=pos,
     )
     db.add(new_word)
-    db.commit()
-    db.refresh(new_word)
+    try:
+        db.commit()
+        db.refresh(new_word)
+    except Exception as e:
+        db.rollback()
+        print(f"Database error while saving word: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save word to database."
+        ) from e
 
     response = models.WordResponse.model_validate(new_word)
     response.audio_url = get_audio_url(audio_filename)
@@ -478,9 +580,9 @@ def update_word(word_id: uuid.UUID, word_in: models.WordUpdate, db: Session = De
         delete_audio(word.audio_filename)
         word.german_word = word_in.german_word
         try:
-            word.audio_filename = generate_audio(word_in.german_word)
+            word.audio_filename = generate_audio(word_in.german_word) or ""
         except Exception as e:
-            word.audio_filename = None
+            word.audio_filename = ""
             print(f"Audio regeneration failed: {e}")
 
     if word_in.english_word is not None:
@@ -495,8 +597,13 @@ def update_word(word_id: uuid.UUID, word_in: models.WordUpdate, db: Session = De
         if pos is not None:
             word.pos = pos
 
-    db.commit()
-    db.refresh(word)
+    try:
+        db.commit()
+        db.refresh(word)
+    except Exception as e:
+        db.rollback()
+        print(f"Database error updating word: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update word.") from e
 
     response = models.WordResponse.model_validate(word)
     response.audio_url = get_audio_url(word.audio_filename)

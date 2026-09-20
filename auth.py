@@ -1,9 +1,8 @@
 import os
-from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 load_dotenv()
 
@@ -35,7 +34,7 @@ def _get_verify_client():
         _supabase_verify_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     return _supabase_verify_client
 
-async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
     if credentials is None or not credentials.credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required. Please sign in.")
     token = credentials.credentials
@@ -89,7 +88,7 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your session has expired. Please sign in again.")
 
-def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+def get_optional_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
     if credentials is None or not credentials.credentials:
         return None
     try:

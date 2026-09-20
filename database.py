@@ -44,7 +44,7 @@ class Word(Base):
     user_id = Column(UUID(as_uuid=True), nullable=True, index=True)
     english_word = Column(String, index=True, nullable=False)
     german_word = Column(String, index=True, nullable=False)
-    audio_filename = Column(String, nullable=False)
+    audio_filename = Column(String, nullable=True, default="")
     entry_type = Column(String, index=True, nullable=False, default="word")
     # Linguistic metadata (nullable = unknown / not applicable).
     # pos: noun | verb | adjective | adverb | phrase | other
