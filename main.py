@@ -3,7 +3,6 @@ import os
 import random
 import uuid
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
@@ -11,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 import models
 from auth import get_current_user, is_admin
@@ -24,38 +23,11 @@ from services import grammar
 from services.translation import translate_text
 from services.tts import delete_audio, generate_audio, get_audio_url
 
-env_path = Path(__file__).resolve().parent / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
-else:
-    load_dotenv()
+load_dotenv()
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
-MODE = os.getenv("MODE", "dev").lower()
-# Known origins for local development and production deployments.
-_DEFAULT_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://localhost:5174",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5174",
-    "https://vocab-app-frontend-rosy.vercel.app",
-    "https://vocabapp.vercel.app",
-]
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip() or (
-    "http://localhost:5173" if MODE == "dev"
-    else "https://vocab-app-frontend-rosy.vercel.app"
-)
-_env_origins = [o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-# Allowing ["*"] with allow_credentials=True causes Starlette CORSMiddleware
-# to dynamically mirror back the caller's Origin in Access-Control-Allow-Origin.
-# This permanently prevents any CORS mismatch across local ports, Vercel preview
-# deployments, and custom domains.
-ALLOWED_ORIGINS = list(dict.fromkeys(
-    ["*"] + [o.rstrip("/") for o in _DEFAULT_ORIGINS] + ([FRONTEND_URL.rstrip("/")] if FRONTEND_URL else []) + _env_origins
-))
+ALLOWED_ORIGINS = ["*"]
 ALLOW_ORIGIN_REGEX = r"^https?://.*$"
 
 
@@ -151,22 +123,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
-
-@app.exception_handler(Exception)
-async def generic_exception_handler(request, exc: Exception):
-    import logging
-    logging.exception("Global exception handler caught: %s", exc)
-    response = JSONResponse(
-        status_code=500,
-        content={"detail": f"Internal Server Error: {str(exc)}"}
-    )
-    origin = request.headers.get("origin")
-    if origin:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Vary"] = "Origin"
-    return response
 
 
 @app.get("/health")
@@ -292,7 +248,7 @@ def get_groups(db: Session = Depends(get_db), user: dict = Depends(get_current_u
                 )
             ).count()
         else:
-            word_count = len(g.words)
+            word_count = db.query(DBWord).join(word_groups).filter(word_groups.c.group_id == g.id).count()
         result.append(models.GroupResponse(
             id=g.id,
             name=g.name,
@@ -357,7 +313,7 @@ def rename_group(group_id: uuid.UUID, group_in: models.GroupRename, db: Session 
         name=group.name,
         is_default=group.is_default,
         created_at=group.created_at,
-        word_count=len(group.words),
+        word_count=db.query(DBWord).join(word_groups).filter(word_groups.c.group_id == group.id).count(),
     )
 
 
@@ -383,7 +339,7 @@ def get_group_words(group_id: uuid.UUID, db: Session = Depends(get_db), user: di
         raise HTTPException(status_code=404, detail="Group not found.")
 
     if group.is_default:
-        words = db.query(DBWord).filter(
+        words = db.query(DBWord).options(selectinload(DBWord.groups)).filter(
             DBWord.user_id == uid,
             ~DBWord.id.in_(
                 db.query(word_groups.c.word_id)
@@ -392,6 +348,8 @@ def get_group_words(group_id: uuid.UUID, db: Session = Depends(get_db), user: di
             )
         ).order_by(DBWord.created_at.desc()).all()
     else:
+        # Avoid N+1 when accessing each word's groups in the loop below
+        group = db.query(DBGroup).options(selectinload(DBGroup.words).selectinload(DBWord.groups)).filter(DBGroup.id == group_id, DBGroup.user_id == uid).first()
         words = group.words
 
     word_responses = []
@@ -543,7 +501,7 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
 @app.get("/words", response_model=list[models.WordResponse])
 def get_words(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     uid = _user_uuid(user)
-    words = db.query(DBWord).filter(DBWord.user_id == uid).order_by(DBWord.created_at.desc()).all()
+    words = db.query(DBWord).options(selectinload(DBWord.groups)).filter(DBWord.user_id == uid).order_by(DBWord.created_at.desc()).all()
     results = []
     for w in words:
         r = models.WordResponse.model_validate(w)
