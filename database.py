@@ -2,7 +2,7 @@ import os
 import uuid
 
 from dotenv import load_dotenv
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, String, Table, create_engine
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Table, create_engine
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -82,6 +82,16 @@ class Review(Base):
     prompt_lang = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     word = relationship("Word")
+
+
+class QuizSession(Base):
+    __tablename__ = "quiz_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    score = Column(Integer, nullable=False)
+    total = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class Profile(Base):

@@ -96,6 +96,33 @@ class QuizSessionResponse(BaseModel):
     size: int
 
 
+class QuizSessionRecordCreate(BaseModel):
+    score: int
+    total: int
+
+
+class QuizSessionRecordResponse(BaseModel):
+    id: UUID
+    score: int
+    total: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ActivityResponse(BaseModel):
+    date: str  # YYYY-MM-DD
+    count: int
+
+
+class StreakResponse(BaseModel):
+    current_streak: int
+    quiz_streak: int
+    activity_heatmap: list[ActivityResponse]
+    quiz_history: list[QuizSessionRecordResponse]
+
+
 class ReviewCreate(BaseModel):
     word_id: UUID
     is_correct: bool

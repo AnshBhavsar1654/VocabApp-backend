@@ -666,6 +666,89 @@ def record_review(req: models.ReviewCreate, db: Session = Depends(get_db), user:
     return review
 
 
+@app.post("/quiz/session/record", response_model=models.QuizSessionRecordResponse)
+def record_quiz_session(req: models.QuizSessionRecordCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    from database import QuizSession
+    uid = _user_uuid(user)
+    session_record = QuizSession(
+        user_id=uid,
+        score=req.score,
+        total=req.total
+    )
+    db.add(session_record)
+    db.commit()
+    db.refresh(session_record)
+    return session_record
+
+
+@app.get("/stats/activity", response_model=models.StreakResponse)
+def get_activity_stats(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    from collections import defaultdict
+    from datetime import date, timedelta
+
+    from database import QuizSession
+
+    uid = _user_uuid(user)
+
+    # 1. Fetch word creation dates
+    words = db.query(DBWord.created_at).filter(DBWord.user_id == uid).all()
+
+    # 2. Fetch quiz session dates & history
+    quiz_sessions = db.query(QuizSession).filter(QuizSession.user_id == uid).order_by(QuizSession.created_at.desc()).all()
+
+    # Map dates for heatmap
+    activity_map = defaultdict(int)
+    quiz_dates = set()
+    all_dates = set()
+
+    for w in words:
+        if w.created_at:
+            d = w.created_at.date()
+            activity_map[d] += 1
+            all_dates.add(d)
+
+    quiz_history = []
+    for qs in quiz_sessions:
+        d = qs.created_at.date()
+        activity_map[d] += 1
+        all_dates.add(d)
+        quiz_dates.add(d)
+        quiz_history.append(qs)
+
+    heatmap = [{"date": str(d), "count": count} for d, count in activity_map.items()]
+
+    # Calculate streaks
+    today = date.today()
+
+    def calc_streak(dates_set):
+        streak = 0
+        current_date = today
+        if current_date in dates_set:
+            streak += 1
+            current_date -= timedelta(days=1)
+        elif (current_date - timedelta(days=1)) in dates_set:
+            current_date -= timedelta(days=1)
+            streak += 1
+            current_date -= timedelta(days=1)
+        else:
+            return 0
+
+        while current_date in dates_set:
+            streak += 1
+            current_date -= timedelta(days=1)
+        return streak
+
+    current_streak = calc_streak(all_dates)
+    quiz_streak = calc_streak(quiz_dates)
+
+    return models.StreakResponse(
+        current_streak=current_streak,
+        quiz_streak=quiz_streak,
+        activity_heatmap=heatmap,
+        quiz_history=quiz_history
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
