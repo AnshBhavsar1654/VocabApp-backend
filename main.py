@@ -20,7 +20,7 @@ from database import Profile as DBProfile
 from database import Word as DBWord
 from database import get_db, word_groups
 from services import grammar
-from services.translation import translate_text
+from services.translation import ALLOWED_LOANWORDS, translate_vocabulary
 from services.tts import delete_audio, generate_audio, get_audio_url
 
 load_dotenv()
@@ -439,6 +439,14 @@ def set_group_word_order(group_id: uuid.UUID, req: models.GroupWordOrder, db: Se
     return {"status": "ok"}
 
 
+@app.post("/words/preview")
+def preview_word_translation(word_in: models.WordCreate, user: dict = Depends(get_current_user)):
+    text = (word_in.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Word text cannot be empty.")
+    return translate_vocabulary(text=text, source_lang=word_in.source_lang, user_pos=word_in.pos)
+
+
 @app.post("/words", response_model=models.WordResponse)
 def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     uid = _user_uuid(user)
@@ -448,12 +456,24 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
     if not text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Word text cannot be empty.")
 
-    if word_in.source_lang == "de":
-        german_word = text
-        english_word = translate_text(text, "de", "en")
-    else:
-        english_word = text
-        german_word = translate_text(text, "en", "de")
+    vocab = translate_vocabulary(
+        text=text,
+        source_lang=word_in.source_lang,
+        user_pos=word_in.pos,
+    )
+
+    english_word = vocab["english_word"]
+    german_word = vocab["german_word"]
+    entry_type = word_in.entry_type or vocab.get("entry_type", "word")
+
+    # Anti-echo protection: Prevent saving identical words if translation failed completely
+    clean_en = english_word.strip().lower()
+    clean_de = german_word.strip().lower()
+    if clean_en == clean_de and clean_en not in ALLOWED_LOANWORDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not find an accurate translation for '{text}'. Please check the spelling or language selection.",
+        )
 
     existing = db.query(DBWord).filter(
         DBWord.user_id == uid,
@@ -471,13 +491,14 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
         print(f"Audio generation failed for '{german_word}': {e}")
         audio_filename = ""
 
-    pos = _resolve_grammar(db, german_word, word_in.pos)
+    # User override wins; otherwise suggested pos from Gemini, fallback to DWDS grammar resolution
+    pos = _resolve_grammar(db, german_word, word_in.pos or vocab.get("pos"))
 
     new_word = DBWord(
         english_word=english_word,
         german_word=german_word,
         audio_filename=audio_filename,
-        entry_type=word_in.entry_type,
+        entry_type=entry_type,
         user_id=uid,
         pos=pos,
     )

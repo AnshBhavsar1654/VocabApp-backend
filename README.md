@@ -51,6 +51,7 @@ RENDER_EXTERNAL_URL=...            # enables the /health keep-alive ping
 MODE=dev|prod
 ADMIN_EMAIL=...
 GRAMMAR_AUTO_SUGGEST=on            # set to off to disable network grammar layers
+GEMINI_API_KEY=AIzaSy...           # Google Gemini API key (generous free tier: 1500 req/day, uses gemini-2.5-flash)
 ```
 
 Run: `uvicorn main:app --reload --port 8000`. Health: `GET /health`.
