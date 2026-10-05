@@ -46,9 +46,10 @@ class Word(Base):
     german_word = Column(String, index=True, nullable=False)
     audio_filename = Column(String, nullable=True, default="")
     entry_type = Column(String, index=True, nullable=False, default="word")
-    # Linguistic metadata (nullable = unknown / not applicable).
     # pos: noun | verb | adjective | adverb | phrase | other
     pos = Column(String, nullable=True, default=None)
+    # gender: m | f | n (primarily for German nouns: der=m, die=f, das=n)
+    gender = Column(String, nullable=True, default=None)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     groups = relationship("Group", secondary=word_groups, back_populates="words")
 

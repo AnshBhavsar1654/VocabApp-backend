@@ -11,6 +11,8 @@ class WordBase(BaseModel):
     entry_type: str = "word"
     # pos: noun | verb | adjective | adverb | phrase | other (None = unknown)
     pos: str | None = None
+    # gender: m | f | n (None for non-nouns or unknown)
+    gender: str | None = None
 
 class WordCreate(BaseModel):
     text: str
@@ -18,11 +20,13 @@ class WordCreate(BaseModel):
     entry_type: str = "word"
     # Optional manual override for the auto-suggest (AddWordForm dropdown).
     pos: str | None = None
+    gender: str | None = None
 
 class WordUpdate(BaseModel):
     english_word: str | None = None
     german_word: str | None = None
     pos: str | None = None
+    gender: str | None = None
 
 class GroupInfo(BaseModel):
     id: UUID

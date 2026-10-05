@@ -20,6 +20,7 @@ from database import Profile as DBProfile
 from database import Word as DBWord
 from database import get_db, word_groups
 from services import grammar
+from services.gender import resolve_gender
 from services.translation import ALLOWED_LOANWORDS, translate_vocabulary
 from services.tts import delete_audio, generate_audio, get_audio_url
 
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE groups ADD COLUMN IF NOT EXISTS word_order JSONB"))
             conn.execute(text("ALTER TABLE words ADD COLUMN IF NOT EXISTS pos TEXT"))
+            conn.execute(text("ALTER TABLE words ADD COLUMN IF NOT EXISTS gender TEXT"))
             conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS full_name TEXT"))
             conn.execute(text("ALTER TABLE words ALTER COLUMN audio_filename DROP NOT NULL"))
     except Exception:
@@ -444,7 +446,14 @@ def preview_word_translation(word_in: models.WordCreate, user: dict = Depends(ge
     text = (word_in.text or "").strip()
     if not text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Word text cannot be empty.")
-    return translate_vocabulary(text=text, source_lang=word_in.source_lang, user_pos=word_in.pos)
+    vocab = translate_vocabulary(text=text, source_lang=word_in.source_lang, user_pos=word_in.pos)
+    pos = _resolve_grammar(None, vocab["german_word"], word_in.pos or vocab.get("pos"))
+    vocab["gender"] = word_in.gender or resolve_gender(
+        german_word=vocab["german_word"],
+        pos=pos,
+        gemini_article=vocab.get("article")
+    )
+    return vocab
 
 
 @app.post("/words", response_model=models.WordResponse)
@@ -493,6 +502,11 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
 
     # User override wins; otherwise suggested pos from Gemini, fallback to DWDS grammar resolution
     pos = _resolve_grammar(db, german_word, word_in.pos or vocab.get("pos"))
+    gender = word_in.gender or resolve_gender(
+        german_word=german_word,
+        pos=pos,
+        gemini_article=vocab.get("article")
+    )
 
     new_word = DBWord(
         english_word=english_word,
@@ -501,6 +515,7 @@ def add_word(word_in: models.WordCreate, db: Session = Depends(get_db), user: di
         entry_type=entry_type,
         user_id=uid,
         pos=pos,
+        gender=gender,
     )
     db.add(new_word)
     try:
@@ -575,6 +590,11 @@ def update_word(word_id: uuid.UUID, word_in: models.WordUpdate, db: Session = De
         pos = _resolve_grammar(db, word.german_word)
         if pos is not None:
             word.pos = pos
+
+    if word_in.gender in ("m", "f", "n"):
+        word.gender = word_in.gender
+    elif german_changed and (word.pos == "noun" or word_in.pos == "noun"):
+        word.gender = resolve_gender(word.german_word, pos=word.pos)
 
     try:
         db.commit()
